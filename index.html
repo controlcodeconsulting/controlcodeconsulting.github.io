@@ -5,15 +5,283 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>controlcodeconsulting</title>
 <style>
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
   body {
     background: #000; color: #fff;
     font-family: Helvetica, Arial, sans-serif; font-size: 30px;
     display: flex; align-items: center; justify-content: center;
   }
+  canvas { position: fixed; inset: 0; }
+  /* dystopian veil: vignette + faint scanlines, monochrome */
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,.85) 100%),
+      repeating-linear-gradient(0deg, rgba(255,255,255,.025) 0 1px, transparent 1px 3px);
+  }
+  h1 { position: relative; z-index: 1; font-size: inherit; font-weight: normal; margin: 0; white-space: nowrap; user-select: none; }
+  h1, h1 > span { transform-style: preserve-3d; }
+  h1 > span { display: inline-block; }
+  h1 span span { display: inline-block; will-change: transform; transition: opacity .6s; }
+  .code .hot { opacity: .35; }
+  #play { position: fixed; z-index: 2; bottom: 24px; left: 50%; transform: translateX(-50%);
+    font: 14px Helvetica, Arial, sans-serif; color: #fff; background: none;
+    border: 1px solid rgba(255,255,255,.5); border-radius: 20px; padding: 8px 18px; cursor: pointer; }
+  #play:hover, #play:focus-visible { background: rgba(255,255,255,.1); }
 </style>
 </head>
 <body>
-<h1 style="font-size: inherit; font-weight: normal; margin: 0;">controlcodeconsulting</h1>
+<canvas id="bg"></canvas>
+<h1 aria-label="controlcodeconsulting"><span class="control" aria-hidden="true">control</span><span class="code" aria-hidden="true">code</span><span class="consulting" aria-hidden="true">consulting</span></h1>
+<script>
+// Headline: reacts to the pointer letter by letter and tilts in 3D — see "headline" below.
+// Background: a 3D field of fragments (letters, digits, symbols, a few whole words) — see below.
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const letters = {};
+for (const w of document.querySelectorAll('h1 > span')) {
+  w.innerHTML = [...w.textContent].map(c => `<span>${c}</span>`).join('');
+  letters[w.className] = [...w.children];
+}
+
+const mouse = { x: -1e4, y: -1e4, nx: 0, ny: 0 };
+addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  mouse.nx = e.clientX / innerWidth - .5; mouse.ny = e.clientY / innerHeight - .5;
+});
+addEventListener('pointerleave', () => { mouse.x = mouse.y = -1e4; mouse.nx = mouse.ny = 0; });
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pick = s => s[Math.random() * s.length | 0];
+const LETTERS = 'contrldesuig';
+const DIGITS = '0123456789';
+const SYMBOLS = '+×/·:;<>{}[]_|=';
+const WORDS = ['control', 'code', 'consulting'];
+function fragment() {
+  const r = Math.random();
+  return r < .2 ? pick(WORDS) : r < .5 ? pick(LETTERS) : r < .75 ? pick(DIGITS) : pick(SYMBOLS);
+}
+
+// ---------- 3D field ----------
+// Fragments fill the screen at every depth and drift slowly toward the viewer.
+// Neighbours attract a little and repel up close, so clumps form, stretch and dissolve.
+// Pointer: nearby fragments are pulled in, swirl around it like iron filings and lift toward
+// the viewer (a local 3D bulge, the rest of the field stays put); a click / tap sends out a shockwave.
+const cv = document.getElementById('bg'), ctx = cv.getContext('2d');
+const F = 600, NEAR = 160, FAR = 2600, LINK = 120, MAG = 240;
+let W, H, parts = [], shock = null;
+addEventListener('pointerdown', e => { shock = { x: e.clientX, y: e.clientY, t: performance.now(), id: (shock?.id || 0) + 1 }; });
+
+// back = recycle into the far fog; spread over a depth range so they never stack in one plane
+function spawn(p, back) {
+  p.d = back ? rnd(FAR - 900, FAR) : rnd(NEAR, FAR);
+  p.x = rnd(-1, 1) * (W / 2 + 80) * p.d / F;
+  p.y = rnd(-1, 1) * (H / 2 + 80) * p.d / F;
+  p.vx = rnd(-.3, .3); p.vy = rnd(-.3, .3); p.lift = 0;
+  p.text = fragment(); p.next = performance.now() + rnd(5000, 16000);
+  return p;
+}
+function resize() {
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // density scales with screen area: ~260 on a phone, up to 1100 on a large display
+  const n = Math.round(Math.min(1100, Math.max(260, W * H / 1300)));
+  parts = Array.from({ length: n }, () => spawn({}));
+}
+addEventListener('resize', resize); resize();
+
+const grid = new Map();
+const key = (x, y, z) => (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
+let lastPts = null;
+
+function drawBg(t = 0) {
+  ctx.clearRect(0, 0, W, H);
+  const sh = shock && t - shock.t < 900 ? shock : null;
+  // click time can be a hair later than this frame's timestamp → clamp, a negative arc radius throws
+  const shR = sh ? Math.max(0, t - sh.t) * .9 : 0; // ring radius in px
+
+  // move + project
+  const pts = [];
+  for (const p of parts) {
+    p.vx = (p.vx + rnd(-.02, .02)) * .975;
+    p.vy = (p.vy + rnd(-.02, .02)) * .975;
+    const v = Math.hypot(p.vx, p.vy);
+    if (v > 30) { p.vx *= 30 / v; p.vy *= 30 / v; } // speed limit
+    p.x += p.vx; p.y += p.vy; p.d -= 1.1;
+    if (t > p.next) { p.text = fragment(); p.next = t + rnd(5000, 16000); }
+    const s = F / Math.max(NEAR, p.d - p.lift);
+    const sx = W / 2 + p.x * s, sy = H / 2 + p.y * s;
+    if (p.d < NEAR || sx < -150 || sx > W + 150 || sy < -150 || sy > H + 150) { spawn(p, true); continue; }
+
+    // magnet: pull toward the pointer plus a sideways swirl; force is in screen px, converted to world units
+    const mx = mouse.x - sx, my = mouse.y - sy, md = Math.hypot(mx, my);
+    let glow = 0;
+    if (md < MAG && md > 1) {
+      const f = (1 - md / MAG) ** 2;
+      p.vx += (mx / md * .9 - my / md * .6) * f / s * .35;
+      p.vy += (my / md * .9 + mx / md * .6) * f / s * .35;
+      glow = f;
+    }
+    p.lift += (glow * 700 - p.lift) * .08; // held fragments come toward the viewer, then sink back
+    // shockwave: push outward where the ring passes
+    if (sh) {
+      const ex = sx - sh.x, ey = sy - sh.y, ed = Math.hypot(ex, ey) || 1;
+      const band = 1 - Math.abs(ed - shR) / 60;
+      if (band > 0) {
+        if (p.hit !== sh.id) { // one kick per fragment per wave
+          p.hit = sh.id;
+          p.vx += ex / ed * 5 / s; p.vy += ey / ed * 5 / s;
+        }
+        glow = Math.max(glow, band);
+      }
+    }
+
+    const a = Math.min(1, (FAR - p.d) / 500) * Math.min(1, (p.d - NEAR) / 300) * Math.min(.8, .9 * s ** 1.3);
+    pts.push({ p, sx, sy, s, a: Math.min(1, a + glow * .6), glow, md });
+  }
+
+  // neighbours via a 3D grid: cohesion/separation + link lines in one pass
+  grid.clear();
+  pts.forEach((A, i) => {
+    A.i = i; A.gx = Math.floor(A.p.x / LINK); A.gy = Math.floor(A.p.y / LINK); A.gz = Math.floor(A.p.d / LINK);
+    const k = key(A.gx, A.gy, A.gz);
+    (grid.get(k) || grid.set(k, []).get(k)).push(A);
+  });
+  ctx.lineWidth = .6;
+  for (const A of pts) { let links = 0; for (let ix = -1; ix <= 1; ix++) for (let iy = -1; iy <= 1; iy++) for (let iz = -1; iz <= 1; iz++) {
+    const cell = grid.get(key(A.gx + ix, A.gy + iy, A.gz + iz));
+    if (cell) for (const B of cell) {
+      if (B.i <= A.i || links >= 12) continue; // cap work per fragment so dense spots can't stall a frame
+      links++;
+      const dx = B.p.x - A.p.x, dy = B.p.y - A.p.y, dz = B.p.d - A.p.d;
+      const d = Math.hypot(dx, dy, dz);
+      if (d > LINK || d === 0) continue;
+      const k = (d < 35 ? -.02 : .0025) / d;
+      A.p.vx += dx * k; A.p.vy += dy * k; B.p.vx -= dx * k; B.p.vy -= dy * k;
+      ctx.strokeStyle = `rgba(255,255,255,${(1 - d / LINK) * .5 * Math.min(A.a, B.a)})`;
+      ctx.beginPath(); ctx.moveTo(A.sx, A.sy); ctx.lineTo(B.sx, B.sy); ctx.stroke();
+    }
+  } }
+
+  // threads from the pointer to the fragments it is holding
+  for (const A of pts) if (A.glow > .15 && A.md < MAG) {
+    ctx.strokeStyle = `rgba(255,255,255,${A.glow * .35})`;
+    ctx.beginPath(); ctx.moveTo(mouse.x, mouse.y); ctx.lineTo(A.sx, A.sy); ctx.stroke();
+  }
+  if (sh) {
+    ctx.strokeStyle = `rgba(255,255,255,${.25 * (1 - shR / 810)})`;
+    ctx.beginPath(); ctx.arc(sh.x, sh.y, shR, 0, 6.283); ctx.stroke();
+  }
+
+  lastPts = pts;
+  pts.sort((A, B) => B.p.d - A.p.d);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const { p, sx, sy, s, a } of pts) {
+    const size = Math.min(48, (p.text.length > 1 ? 10 : 13) * s);
+    if (size < 3) continue;
+    ctx.font = `${size}px Helvetica, Arial, sans-serif`;
+    ctx.fillStyle = `rgba(255,255,255,${a})`;
+    ctx.fillText(p.text, sx, sy);
+  }
+}
+
+// ---------- headline ----------
+// code: every 7 s it slips into symbols and decodes again, one letter at a time, at a calm pace
+let scrambleStart = -1e4, lastTick = 0;
+function code(t) {
+  const el = letters.code, orig = 'code', age = t - scrambleStart;
+  if (age > 7000) scrambleStart = t;
+  const tick = t - lastTick > 220; // glyphs change ~4×/s, not every frame
+  if (tick) lastTick = t;
+  el.forEach((s, i) => {
+    const settled = age > 900 + i * 450;
+    if (settled) s.textContent = orig[i];
+    else if (tick) s.textContent = pick(SYMBOLS + DIGITS);
+    s.classList.toggle('hot', !settled);
+  });
+}
+
+// Every headline letter is a small spring. Near the pointer:
+//   control    → letters dodge and spin away
+//   code       → letters jump toward the viewer and start decoding
+//   consulting → letters rise and come forward (on top of their slow wave)
+// The whole word tilts in 3D toward the pointer, letters throw threads to nearby fragments,
+// and a click / tap knocks them around.
+const h1 = document.querySelector('h1');
+const glyphs = Object.entries(letters).flatMap(([w, els]) =>
+  els.map((s, i) => ({ s, w, i, bx: 0, by: 0, x: 0, y: 0, z: 0, r: 0, vx: 0, vy: 0, vz: 0, vr: 0 })));
+function measure() { // layout positions, unaffected by transforms
+  for (const g of glyphs) {
+    g.bx = h1.offsetLeft + g.s.offsetLeft + g.s.offsetWidth / 2;
+    g.by = h1.offsetTop + g.s.offsetTop + g.s.offsetHeight / 2;
+  }
+}
+addEventListener('resize', measure); measure(); document.fonts?.ready.then(measure);
+
+addEventListener('pointerdown', e => {
+  for (const g of glyphs) {
+    const dx = g.bx + g.x - e.clientX, dy = g.by + g.y - e.clientY, d = Math.hypot(dx, dy) || 1;
+    if (d < 500) {
+      const k = (1 - d / 500) * 18;
+      g.vx += dx / d * k; g.vy += dy / d * k; g.vz += k * 2; g.vr += rnd(-1, 1) * k * 2;
+    }
+  }
+});
+
+let tiltX = 0, tiltY = 0;
+function headline(t) {
+  const hx = h1.offsetLeft + h1.offsetWidth / 2, hy = h1.offsetTop + h1.offsetHeight / 2;
+  const hp = Math.max(0, 1 - Math.hypot(mouse.x - hx, mouse.y - hy) / 450); // pointer near the word
+  tiltY += ((mouse.x - hx) / 450 * 30 * hp - tiltY) * .08;
+  tiltX += (-(mouse.y - hy) / 450 * 30 * hp - tiltX) * .08;
+  h1.style.transform = `perspective(700px) rotateX(${tiltX}deg) rotateY(${tiltY}deg)`;
+
+  for (const g of glyphs) {
+    const dx = g.bx - mouse.x, dy = g.by - mouse.y, d = Math.hypot(dx, dy) || 1;
+    const p = Math.max(0, 1 - d / 160);
+    let tx = 0, ty = 0, tz = p * 25, tr = 0;
+    if (g.w === 'control') { tx = dx / d * p * 40; ty = dy / d * p * 40; tr = dx / d * p * 40; }
+    else if (g.w === 'code') { tz = p * 60; if (p > .3 && t - scrambleStart > 3500) scrambleStart = t; }
+    else {
+      const wave = Math.sin(t / 900 + g.i * .5);
+      ty = wave * 4 - p * 16; tz = p * 45;
+      g.s.style.opacity = Math.min(1, .75 + .25 * wave + p);
+    }
+    g.vx = (g.vx + (tx - g.x) * .12) * .78; g.x += g.vx;
+    g.vy = (g.vy + (ty - g.y) * .12) * .78; g.y += g.vy;
+    g.vz = (g.vz + (tz - g.z) * .12) * .78; g.z += g.vz;
+    g.vr = (g.vr + (tr - g.r) * .12) * .78; g.r += g.vr;
+    g.s.style.transform = `translate3d(${g.x}px, ${g.y}px, ${g.z}px) rotate(${g.r}deg)`;
+  }
+
+  // threads: when the pointer is near, the letters reach out to fragments around them
+  if (hp > 0 && lastPts) {
+    ctx.lineWidth = .6;
+    for (const g of glyphs) {
+      const gx = g.bx + g.x, gy = g.by + g.y;
+      for (const A of lastPts) {
+        const d = Math.hypot(A.sx - gx, A.sy - gy);
+        if (d < 90) {
+          ctx.strokeStyle = `rgba(255,255,255,${hp * .5 * (1 - d / 90) * A.a})`;
+          ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(A.sx, A.sy); ctx.stroke();
+        }
+      }
+    }
+  }
+}
+
+function frame(t) {
+  requestAnimationFrame(frame); // schedule first, so one bad frame can never stop the animation
+  drawBg(t); code(t); headline(t);
+}
+// respect "reduce motion": start still, let the visitor opt in
+if (still) {
+  drawBg();
+  const b = document.body.appendChild(document.createElement('button'));
+  b.id = 'play'; b.textContent = 'Effekte an';
+  b.onclick = () => { b.remove(); requestAnimationFrame(frame); };
+} else requestAnimationFrame(frame);
+</script>
 </body>
 </html>
